@@ -1,7 +1,19 @@
 # Netlify configuration file
 # This ensures proper SPA routing for React applications
 
+[build]
+  publish = "dist"
+  command = "npm run build"
+
+[build.environment]
+  NODE_VERSION = "18"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+
+# Environment variables can be set in Netlify dashboard
+# or uncommented here for testing (not recommended for production)
+# [build.environment]
+#   VITE_BACKEND_URL = "https://your-backend-domain.com"
