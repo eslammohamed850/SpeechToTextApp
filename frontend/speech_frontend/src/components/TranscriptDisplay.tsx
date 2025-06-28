@@ -22,7 +22,6 @@ const TranscriptDisplay: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   
   const websocketRef = useRef<WebSocket | null>(null);
-  // const mediaRecorderRef = useRef<MediaRecorder | null>(null); // Removed unused ref
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -36,77 +35,88 @@ const TranscriptDisplay: React.FC = () => {
 
   const connectWebSocket = () => {
     setConnectionStatus('connecting');
+    setError(null);
     
-    // Create WebSocket connection to backend
-    // For GitHub/Netlify deployment: automatically detect the backend URL
-    // If deployed to Netlify, the backend should be deployed separately (e.g., to Render/Railway)
-    // For local development, it will connect to localhost:8000
-    let backendUrl;
+    // Get backend URL from environment variable or default to localhost
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
     
-    // Production deployment: check if we're on Netlify and use environment variable
-    if (import.meta.env.VITE_BACKEND_URL) {
-      backendUrl = import.meta.env.VITE_BACKEND_URL;
-    } 
-    // Local development
-    else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-      backendUrl = `${window.location.protocol}//${window.location.hostname}:8000`;
-    }
-    // Fallback to the temporary sandbox URL (will be replaced in production)
-    else {
-      backendUrl = 'https://8000-ix25znd9yo61gqc1xikqe-6f06528a.manusvm.computer';
-    }
+    // Convert HTTP URL to WebSocket URL
+    const wsUrl = backendUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+    const fullWsUrl = `${wsUrl}/ws/transcribe?session_id=${Date.now()}`;
     
-    const wsProtocol = backendUrl.startsWith('https') ? 'wss' : 'ws';
-    const wsUrl = `${wsProtocol}://${backendUrl.replace('https://', '').replace('http://', '')}/ws/transcribe?session_id=${Date.now()}`;
-    console.log('Connecting to WebSocket:', wsUrl);
-    const ws = new WebSocket(wsUrl);
+    console.log('Connecting to WebSocket:', fullWsUrl);
     
-    ws.onopen = () => {
-      console.log('WebSocket connection established');
-      setConnectionStatus('connected');
-      setError(null);
-    };
-    
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    try {
+      const ws = new WebSocket(fullWsUrl);
       
-      if (data.type === 'partial_transcript') {
-        setPartialTranscript(data.text);
-      } else if (data.type === 'final_transcript') {
-        // Add timestamp for display
-        const timestamp = new Date().toLocaleTimeString();
-        setTranscripts(prev => [...prev, {...data, timestamp}]);
-        setPartialTranscript('');
-      } else if (data.type === 'error') {
-        setError(data.message);
-      }
-    };
-    
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setError('WebSocket connection error. Please try again.');
+      ws.onopen = () => {
+        console.log('WebSocket connection established');
+        setConnectionStatus('connected');
+        setError(null);
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'partial_transcript') {
+            setPartialTranscript(data.text);
+          } else if (data.type === 'final_transcript') {
+            // Add timestamp for display
+            const timestamp = new Date().toLocaleTimeString();
+            setTranscripts(prev => [...prev, {...data, timestamp}]);
+            setPartialTranscript('');
+          } else if (data.type === 'error') {
+            setError(data.message);
+          }
+        } catch (err) {
+          console.error('Error parsing WebSocket message:', err);
+          setError('Error parsing server response');
+        }
+      };
+      
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setError('WebSocket connection error. Please check if the backend server is running.');
+        setConnectionStatus('disconnected');
+      };
+      
+      ws.onclose = (event) => {
+        console.log('WebSocket connection closed:', event.code, event.reason);
+        setConnectionStatus('disconnected');
+        if (event.code !== 1000) { // 1000 is normal closure
+          setError('WebSocket connection lost. Please try again.');
+        }
+      };
+      
+      websocketRef.current = ws;
+    } catch (err) {
+      console.error('Error creating WebSocket:', err);
+      setError('Failed to create WebSocket connection. Please check the backend URL.');
       setConnectionStatus('disconnected');
-    };
-    
-    ws.onclose = () => {
-      console.log('WebSocket connection closed');
-      setConnectionStatus('disconnected');
-    };
-    
-    websocketRef.current = ws;
+    }
   };
 
   const startRecording = async () => {
     try {
+      setError(null);
+      
       // Connect WebSocket first
       connectWebSocket();
       
       // Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true
+        } 
+      });
       streamRef.current = stream;
       
       // Set up audio processing
-      const audioContext = new AudioContext();
+      const audioContext = new AudioContext({ sampleRate: 16000 });
       audioContextRef.current = audioContext;
       
       const source = audioContext.createMediaStreamSource(stream);
@@ -121,7 +131,7 @@ const TranscriptDisplay: React.FC = () => {
         if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN) {
           // Convert audio data to format expected by backend
           const inputData = e.inputBuffer.getChannelData(0);
-          const downsampledBuffer = downsampleBuffer(inputData, 44100, 16000);
+          const downsampledBuffer = downsampleBuffer(inputData, audioContext.sampleRate, 16000);
           const wav = convertToWav(downsampledBuffer, 16000);
           
           // Send audio data to WebSocket
@@ -132,7 +142,8 @@ const TranscriptDisplay: React.FC = () => {
       setIsRecording(true);
     } catch (err) {
       console.error('Error starting recording:', err);
-      setError('Could not access microphone. Please check permissions.');
+      setError('Could not access microphone. Please check permissions and try again.');
+      setConnectionStatus('disconnected');
     }
   };
 
@@ -151,12 +162,13 @@ const TranscriptDisplay: React.FC = () => {
     
     // Close WebSocket
     if (websocketRef.current) {
-      websocketRef.current.close();
+      websocketRef.current.close(1000, 'Recording stopped');
       websocketRef.current = null;
     }
     
     setIsRecording(false);
     setConnectionStatus('disconnected');
+    setPartialTranscript('');
   };
 
   // Helper function to downsample audio buffer
@@ -316,6 +328,7 @@ const TranscriptDisplay: React.FC = () => {
                 variant={isRecording ? "destructive" : "default"}
                 size="sm"
                 onClick={isRecording ? stopRecording : startRecording}
+                disabled={connectionStatus === 'connecting'}
               >
                 {isRecording ? <><MicOff className="mr-2 h-4 w-4" /> Stop</> : <><Mic className="mr-2 h-4 w-4" /> Start</>}
               </Button>
@@ -323,13 +336,21 @@ const TranscriptDisplay: React.FC = () => {
           </CardTitle>
           <CardDescription>
             Click "Start" to begin recording and transcribing your speech in real-time with sentiment analysis.
+            {import.meta.env.VITE_BACKEND_URL && (
+              <div className="text-xs text-gray-500 mt-1">
+                Backend: {import.meta.env.VITE_BACKEND_URL}
+              </div>
+            )}
           </CardDescription>
         </CardHeader>
         
         <CardContent>
           {error && (
             <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-              {error}
+              <strong>Error:</strong> {error}
+              <div className="text-sm mt-1">
+                Make sure the backend server is running at {import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'}
+              </div>
             </div>
           )}
           
@@ -337,6 +358,7 @@ const TranscriptDisplay: React.FC = () => {
             {transcripts.length === 0 && !partialTranscript && !isRecording ? (
               <div className="text-center text-gray-500 h-full flex flex-col justify-center">
                 <p>No transcripts yet. Start recording to see transcriptions here.</p>
+                <p className="text-sm mt-2">Make sure your microphone is connected and the backend server is running.</p>
               </div>
             ) : (
               <>
@@ -368,6 +390,7 @@ const TranscriptDisplay: React.FC = () => {
                     <Skeleton className="h-4 w-4 rounded-full bg-gray-300 animate-pulse" />
                     <Skeleton className="h-4 w-4 rounded-full bg-gray-300 animate-pulse" />
                     <Skeleton className="h-4 w-4 rounded-full bg-gray-300 animate-pulse" />
+                    <span className="text-sm text-gray-500 ml-2">Listening...</span>
                   </div>
                 )}
                 
